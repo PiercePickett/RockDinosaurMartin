@@ -823,6 +823,7 @@ def main() -> int:
     laser_follow_class_i: int | None = None
     last_laser_sent: bool | None = None
     lost_streak: int = 0  # frames without target after lock; triggers re-sweep
+    resume_sweep_idx: int | None = None  # sweep index when seek last locked; used to resume after loss
 
     print(
         "Q/Esc quit | P rotate | R/B/G/Y seek | X cancel seek | 0–9 camera",
@@ -889,6 +890,7 @@ def main() -> int:
                             f"Seek done: {seek.label} @ servo {cur_ang}° "
                             f"(P({seek.label})={conf_t:.2f})"
                         )
+                        resume_sweep_idx = seek.sweep_idx
                         laser_follow_class_i = seek.target_i
                         seek = None
                         lost_streak = 0
@@ -927,7 +929,11 @@ def main() -> int:
                         laser_follow_class_i = None
                         lost_streak = 0
                         seek = SeekState(target_i=ix, label=class_names[ix])
-                        seek.sweep_idx = 0
+                        seek.sweep_idx = (
+                            resume_sweep_idx
+                            if resume_sweep_idx is not None
+                            else 0
+                        ) % len(sweep_angles)
                         t0 = time.monotonic()
                         send_servo_angle(ser, sweep_angles[seek.sweep_idx])
                         seek.settle_until = t0 + args.seek_settle
@@ -1049,6 +1055,7 @@ def main() -> int:
             laser_follow_class_i = None
             seek = None
             lost_streak = 0
+            resume_sweep_idx = None
             print("Seek cancelled.")
 
         color_key = {ord("r"): "red", ord("R"): "red", ord("b"): "blue", ord("B"): "blue",
@@ -1066,6 +1073,7 @@ def main() -> int:
                 else:
                     laser_follow_class_i = None
                     lost_streak = 0
+                    resume_sweep_idx = None
                     if ser is not None:
                         send_laser(ser, False)
                         last_laser_sent = False
