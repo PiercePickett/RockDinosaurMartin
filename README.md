@@ -1,4 +1,5 @@
 # RockDinosaurMartin
+<img width="299" height="168" alt="image" src="https://github.com/user-attachments/assets/0637e1d3-e0f6-4c11-a95d-edf20bf0474f" />
 
 Run the dinosaur classifier on a **local webcam** with OpenCV. Provide a trained checkpoint and class list (see below); training is out of scope here.
 
