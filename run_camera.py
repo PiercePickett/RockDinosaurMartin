@@ -608,8 +608,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--seek-hits",
         type=int,
-        default=3,
-        help="Consecutive seek hits required to stop (interactive and --seek).",
+        default=1,
+        help="Consecutive confident detections required to end seek (default 1 = stop as soon as "
+        "the target is seen; use 2–3 to reduce false stops from noisy frames).",
     )
     p.add_argument(
         "--seek-max-frames",
