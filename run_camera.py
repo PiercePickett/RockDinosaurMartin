@@ -613,6 +613,13 @@ def parse_args() -> argparse.Namespace:
         "the target is seen; use 2–3 to reduce false stops from noisy frames).",
     )
     p.add_argument(
+        "--seek-reacquire-frames",
+        type=int,
+        default=3,
+        help="After seek succeeds, resume servo sweep if the target is not confidently seen in the "
+        "ROI for this many consecutive frames (interactive only; 0 = never auto-resume).",
+    )
+    p.add_argument(
         "--seek-max-frames",
         type=int,
         default=35,
@@ -815,6 +822,7 @@ def main() -> int:
     # After seek succeeds: keep laser tied to live ROI until a new seek / cancel.
     laser_follow_class_i: int | None = None
     last_laser_sent: bool | None = None
+    lost_streak: int = 0  # frames without target after lock; triggers re-sweep
 
     print(
         "Q/Esc quit | P rotate | R/B/G/Y seek | X cancel seek | 0–9 camera",
@@ -837,7 +845,10 @@ def main() -> int:
         roi_side = x2 - x1
 
         frame_idx += 1
-        infer_every = 1 if seek else max(1, args.every_n)
+        _need_fast_infer = seek is not None or (
+            laser_follow_class_i is not None and args.seek_reacquire_frames > 0
+        )
+        infer_every = 1 if _need_fast_infer else max(1, args.every_n)
         run_infer = frame_idx % infer_every == 0
 
         if run_infer:
@@ -880,6 +891,7 @@ def main() -> int:
                         )
                         laser_follow_class_i = seek.target_i
                         seek = None
+                        lost_streak = 0
                     elif (
                         now >= seek.next_angle_time
                         or seek.frames_at_angle >= args.seek_max_frames
@@ -893,6 +905,39 @@ def main() -> int:
                         )
                         seek.frames_at_angle = 0
                         seek.hits = 0
+
+            if (
+                seek is None
+                and laser_follow_class_i is not None
+                and ser is not None
+                and args.seek_reacquire_frames > 0
+            ):
+                if laser_on_for_target(
+                    probs, laser_follow_class_i, min_prob=args.min_confidence
+                ):
+                    lost_streak = 0
+                else:
+                    lost_streak += 1
+                    if lost_streak >= args.seek_reacquire_frames:
+                        ix = laser_follow_class_i
+                        print(
+                            f"Lost track of {class_names[ix]}; resuming sweep.",
+                            flush=True,
+                        )
+                        laser_follow_class_i = None
+                        lost_streak = 0
+                        seek = SeekState(target_i=ix, label=class_names[ix])
+                        seek.sweep_idx = 0
+                        t0 = time.monotonic()
+                        send_servo_angle(ser, sweep_angles[seek.sweep_idx])
+                        seek.settle_until = t0 + args.seek_settle
+                        seek.next_angle_time = (
+                            t0 + args.seek_settle + args.seek_per_angle_sec
+                        )
+                        seek.frames_at_angle = 0
+                        seek.hits = 0
+                        ema_probs = None
+                        frame_idx = 0
 
             if ser is not None:
                 t = seek.target_i if seek is not None else laser_follow_class_i
@@ -1003,6 +1048,7 @@ def main() -> int:
                 last_laser_sent = False
             laser_follow_class_i = None
             seek = None
+            lost_streak = 0
             print("Seek cancelled.")
 
         color_key = {ord("r"): "red", ord("R"): "red", ord("b"): "blue", ord("B"): "blue",
@@ -1019,6 +1065,7 @@ def main() -> int:
                     print("Cannot seek class 'none'.", file=sys.stderr)
                 else:
                     laser_follow_class_i = None
+                    lost_streak = 0
                     if ser is not None:
                         send_laser(ser, False)
                         last_laser_sent = False
