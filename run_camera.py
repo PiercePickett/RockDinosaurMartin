@@ -10,7 +10,7 @@ For best results, train on **similar center crops** (same camera FOV and ROI fra
 
 Capture requests **1920×1080**, then after **rotation** the frame is **center-cropped to 16:9 landscape** (edges removed as needed). The classifier ROI is a square **at most 480×480** px, **centered horizontally** and by default **aligned to the bottom** of the view (see `--roi-vertical`).
 
-Defaults: **camera index 3**, **90°** rotation, **`--device cpu`** (avoids slow CUDA probing; use **`--device auto`** or **`cuda`** for GPU). **Serial** is prompted at startup (empty = camera only), except **`--seek COLOR`** headless mode (port required). Quit: Q/Esc. **0–9** cameras. **P** view rotate. **R/B/G/Y** servo seek. **`--seek red|blue|green|yellow`** runs a blocking sweep with no GUI. Flash **sketch_mar28a.ino** (115200 baud).
+Defaults: **camera index 3**, **90°** rotation, **`--device cpu`** (avoids slow CUDA probing; use **`--device auto`** or **`cuda`** for GPU). **Serial** is prompted at startup (empty = camera only), except **`--seek COLOR`** / **`--shoot-mission`** headless modes (port required). Quit: Q/Esc. **0–9** cameras. **P** view rotate. **R/B/G/Y** servo seek. **`--seek COLOR`** or **`--shoot-mission`** (uses `state.TARGET_BITS`) run blocking sweeps with no GUI. Flash **sketch_mar28a.ino** (115200 baud).
 """
 
 from __future__ import annotations
@@ -252,6 +252,99 @@ def run_headless_seek(
         file=sys.stderr,
     )
     return 1
+
+
+def run_shoot_mission(args: argparse.Namespace) -> int:
+    """
+    Read ``state.TARGET_BITS`` (same order as ``state.TARGET_NAMES``: red, green, blue, yellow).
+    For each bit set, run headless seek, then laser ON for ``args.laser_fire_sec``, then OFF.
+    """
+    import state
+
+    bits = list(getattr(state, "TARGET_BITS", []))
+    names = tuple(getattr(state, "TARGET_NAMES", ("red", "green", "blue", "yellow")))
+    n = min(len(bits), len(names))
+    queue = [names[i] for i in range(n) if bits[i]]
+    if not queue:
+        print(
+            "state.TARGET_BITS has no targets (all zeros). Edit state.py.",
+            file=sys.stderr,
+        )
+        return 1
+
+    print("Shoot mission — targets in order:", queue)
+    print("Serial port required.")
+    port_line = input("Port (e.g. COM3): ").strip()
+    if not port_line:
+        print("Aborted.", file=sys.stderr)
+        return 1
+    ser = open_servo_serial(port_line, wait_after_open=args.serial_wait)
+    if ser is None:
+        return 1
+    _import_heavy()
+    device = pick_device(args.device)
+    print("Device:", device)
+    print(
+        "ROI: fraction",
+        args.roi_fraction,
+        "| max square",
+        args.max_roi_side,
+        "| vertical",
+        getattr(args, "roi_vertical", "bottom"),
+        "| capture request",
+        f"{args.capture_width}x{args.capture_height}",
+        "| output after rotation: 16:9 crop",
+    )
+    print()
+    try:
+        model, class_names, image_size = load_classifier(
+            args.checkpoint, args.classes, device
+        )
+    except (FileNotFoundError, ValueError) as e:
+        print(e, file=sys.stderr)
+        ser.close()
+        return 1
+    tfm = make_transform(image_size)
+    cap = open_camera_capture(int(args.camera))
+    if not cap.isOpened():
+        print(f"Could not open camera {args.camera}", file=sys.stderr)
+        ser.close()
+        return 1
+    configure_capture_resolution(cap, args.capture_width, args.capture_height)
+
+    fire = float(getattr(args, "laser_fire_sec", 1.0))
+    try:
+        for i, color in enumerate(queue):
+            print(f"\n=== Mission {i + 1}/{len(queue)}: seek {color!r} ===")
+            rc = run_headless_seek(
+                ser,
+                cap,
+                model,
+                class_names,
+                tfm,
+                device,
+                color,
+                1,
+                args,
+            )
+            if rc != 0:
+                print(f"Mission failed: could not find {color!r}.", file=sys.stderr)
+                return 1
+            print(
+                f"Locked on {color}. Laser ON for {fire:.2f}s (shoot)...",
+                flush=True,
+            )
+            send_laser(ser, True)
+            time.sleep(fire)
+            send_laser(ser, False)
+            print("Laser OFF.", flush=True)
+    finally:
+        send_laser(ser, False)
+        cap.release()
+        ser.close()
+
+    print("\nAll targeted dinosaurs shot. Mission complete.")
+    return 0
 
 
 def _try_windows_directshow_names() -> list[str] | None:
@@ -649,6 +742,19 @@ def parse_args() -> argparse.Namespace:
         default=0.5,
         help="Seconds to wait after opening serial (USB reset). Increase if servo misses commands.",
     )
+    p.add_argument(
+        "--shoot-mission",
+        action="store_true",
+        help="Read state.TARGET_BITS [R,G,B,Y]; for each 1, seek that color then laser ON for "
+        "--laser-fire-sec (requires serial, no GUI).",
+    )
+    p.add_argument(
+        "--laser-fire-sec",
+        type=float,
+        default=1.0,
+        dest="laser_fire_sec",
+        help="With --shoot-mission: seconds to hold the laser on after each lock (default 1).",
+    )
     return p.parse_args()
 
 
@@ -687,6 +793,9 @@ def main() -> int:
     _progress("Parsing command line…")
     args = parse_args()
     sweep_angles = build_sweep_angles(args.seek_angle_step)
+
+    if args.shoot_mission:
+        return run_shoot_mission(args)
 
     if args.seek is not None:
         print("Headless seek mode — serial port required.")
