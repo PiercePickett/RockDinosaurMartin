@@ -1,14 +1,14 @@
 """
 Live webcam inference using the ResNet-18 classifier.
 
-Classifies only a **center square ROI** (crosshair region), not the full frame—so the
-model answers “what’s in the middle of the screen?” Place the toy in that region.
+Classifies a **square ROI** (crosshair), not the full frame—by default **centered horizontally
+and aligned to the bottom** of the view (``--roi-vertical``). Place the toy in that region.
 
 Expects artifacts/dinosaur_classifier.pt and artifacts/class_names.json (or --checkpoint / --classes).
 
 For best results, train on **similar center crops** (same camera FOV and ROI fraction).
 
-Capture requests **1920×1080**, then after **rotation** the frame is **center-cropped to 16:9 landscape** (edges removed as needed). The classifier ROI is a centered square **at most 480×480** px.
+Capture requests **1920×1080**, then after **rotation** the frame is **center-cropped to 16:9 landscape** (edges removed as needed). The classifier ROI is a square **at most 480×480** px, **centered horizontally** and by default **aligned to the bottom** of the view (see `--roi-vertical`).
 
 Defaults: **camera index 3**, **90°** rotation, **`--device cpu`** (avoids slow CUDA probing; use **`--device auto`** or **`cuda`** for GPU). **Serial** is prompted at startup (empty = camera only), except **`--seek COLOR`** headless mode (port required). Quit: Q/Esc. **0–9** cameras. **P** view rotate. **R/B/G/Y** servo seek. **`--seek red|blue|green|yellow`** runs a blocking sweep with no GUI. Flash **sketch_mar28a.ino** (115200 baud).
 """
@@ -200,9 +200,7 @@ def run_headless_seek(
                     frame = apply_rotation(frame, rot_k)
                     frame = crop_to_horizontal_16_9(frame)
                     h, w = frame.shape[:2]
-                    x1, y1, x2, y2 = center_square_roi(
-                        h, w, args.roi_fraction, max_roi_side=args.max_roi_side
-                    )
+                    x1, y1, x2, y2 = roi_box_from_args(h, w, args)
 
                     x = crop_to_tensor(frame, x1, y1, x2, y2, tfm, device)
                     with torch.no_grad():
@@ -397,17 +395,32 @@ def center_square_roi(
     w: int,
     fraction: float,
     max_roi_side: int = 480,
+    vertical: str = "bottom",
 ) -> tuple[int, int, int, int]:
-    """Return (x1, y1, x2, y2) inclusive-exclusive crop box; square side ≤ max_roi_side and ≤ frame."""
+    """Return (x1, y1, x2, y2) inclusive-exclusive crop box; square side ≤ max_roi_side and ≤ frame.
+
+    vertical: ``center`` — square centered in the frame; ``bottom`` — same size, centered
+    horizontally with the **bottom edge** flush against the bottom of the frame.
+    """
     side = int(min(w, h) * fraction)
     side = min(side, max_roi_side, min(w, h))
     side = max(32, side)
-    cx, cy = w // 2, h // 2
-    half = side // 2
-    x1 = cx - half
-    y1 = cy - half
-    x2 = x1 + side
-    y2 = y1 + side
+
+    if vertical == "bottom":
+        cx = w // 2
+        half = side // 2
+        x1 = cx - half
+        x2 = x1 + side
+        y2 = h
+        y1 = h - side
+    else:
+        cx, cy = w // 2, h // 2
+        half = side // 2
+        x1 = cx - half
+        y1 = cy - half
+        x2 = x1 + side
+        y2 = y1 + side
+
     if x1 < 0:
         x2 -= x1
         x1 = 0
@@ -472,10 +485,21 @@ def draw_roi_crosshair(
     cv2.line(frame, (cx, y1), (cx, y2 - 1), color_cross, 1, lineType=cv2.LINE_AA)
 
 
+def roi_box_from_args(h: int, w: int, args: argparse.Namespace) -> tuple[int, int, int, int]:
+    """ROI used for inference, on-screen crosshair, and seek (find-dinosaur) — one consistent box."""
+    v = getattr(args, "roi_vertical", "bottom")
+    if v not in ("center", "bottom"):
+        v = "bottom"
+    return center_square_roi(
+        h, w, args.roi_fraction, max_roi_side=args.max_roi_side, vertical=v
+    )
+
+
 def parse_args() -> argparse.Namespace:
     root = Path(__file__).resolve().parent
     p = argparse.ArgumentParser(
-        description="Classify the center square ROI (crosshair) with the dinosaur classifier."
+        description="Dinosaur classifier on the ROI crosshair (default: bottom-aligned; see --roi-vertical). "
+        "R/B/G/Y seek sweeps the servo until the target class locks in that ROI."
     )
     p.add_argument(
         "--checkpoint",
@@ -504,7 +528,7 @@ def parse_args() -> argparse.Namespace:
         "--roi-fraction",
         type=float,
         default=0.42,
-        help="Center square side as fraction of min(w,h); side is also capped by --max-roi-side (default 480).",
+        help="Square ROI side as fraction of min(w,h); side is also capped by --max-roi-side (default 480).",
     )
     p.add_argument(
         "--ema",
@@ -546,7 +570,14 @@ def parse_args() -> argparse.Namespace:
         "--max-roi-side",
         type=int,
         default=480,
-        help="Maximum center ROI square size in pixels (default 480).",
+        help="Maximum ROI square size in pixels (default 480).",
+    )
+    p.add_argument(
+        "--roi-vertical",
+        type=str,
+        default="bottom",
+        choices=("center", "bottom"),
+        help="ROI vertical placement: centered in frame, or centered horizontally along the bottom edge (default).",
     )
     p.add_argument(
         "--seek",
@@ -666,6 +697,8 @@ def main() -> int:
             args.roi_fraction,
             "| max square",
             args.max_roi_side,
+            "| vertical",
+            getattr(args, "roi_vertical", "bottom"),
             "| capture request",
             f"{args.capture_width}x{args.capture_height}",
             "| output after rotation: 16:9 crop",
@@ -735,6 +768,8 @@ def main() -> int:
         args.roi_fraction,
         "| max square",
         args.max_roi_side,
+        "| vertical",
+        getattr(args, "roi_vertical", "bottom"),
         "| capture request",
         f"{args.capture_width}x{args.capture_height}",
         "| output after rotation: 16:9 crop",
@@ -797,9 +832,7 @@ def main() -> int:
         frame = crop_to_horizontal_16_9(frame)
 
         h, w = frame.shape[:2]
-        x1, y1, x2, y2 = center_square_roi(
-            h, w, args.roi_fraction, max_roi_side=args.max_roi_side
-        )
+        x1, y1, x2, y2 = roi_box_from_args(h, w, args)
         roi_side = x2 - x1
 
         frame_idx += 1
