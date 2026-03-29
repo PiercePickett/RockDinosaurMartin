@@ -1,0 +1,5 @@
+# Runtime mission bits (gesture SEND / state.save_target_bits)
+state_target_bits.json
+
+# MediaPipe hand landmarker task (downloaded on first gesture client run)
+.cache/

@@ -71,11 +71,44 @@ Tune with **`--seek-angle-step`**, **`--seek-settle`**, **`--seek-min-confidence
 
 Class names in `class_names.json` must match (e.g. `"red"`, `"blue"`).
 
+## Gesture client + `state.py` (control `run_camera`)
+
+The gesture program (`src/gestureClient.py`) and `run_camera.py` are **separate processes**, so they do not share Python memory. Mission bits are shared through **`state.py`** helpers and a small runtime file next to it:
+
+- **`state.load_target_bits()`** / **`state.save_target_bits([R,G,B,Y])`** — read/write the four mission bits (red, green, blue, yellow).
+- **`state_target_bits.json`** — lives next to **`state.py`**. It is **created** the first time **`state.load_target_bits()`** runs (e.g. start the gesture client or run `run_camera` with `--shoot-mission` / `--seek-from-state`), seeded from **`TARGET_BITS`** in `state.py`. It is **updated** when you **SEND** from the gesture client or call **`save_target_bits`** yourself.
+
+**Setup**
+
+1. From the **repository root** (so `import state` resolves), install deps: `pip install -r requirements.txt` (includes **mediapipe ≥ 0.10** and OpenCV). PyPI’s current `mediapipe` wheel does **not** include the old `mediapipe.solutions` API; this repo uses the **Tasks** `HandLandmarker` instead.
+2. **First run** downloads the hand model (~few MB) into **`.cache/hand_landmarker.task`**. To use your own file, set **`MEDIAPIPE_HAND_MODEL_PATH`** to a `.task` path.
+3. Run the gesture client: `python src/gestureClient.py` (on Windows the script uses **DirectShow** for the default camera index `0`).
+4. Use **attention mode** and finger gestures to build the `[R,G,B,Y]` bit pattern, then **SEND** (`2/2` after dwell). That writes **`state_target_bits.json`** and also sends a **UDP** packet to **`127.0.0.1:8000`** (run **`python src/gestureServer.py`** in another terminal if you want to see it). Override host/port with **`GESTURE_SERVER_HOST`** / **`GESTURE_SERVER_PORT`**.
+
+**Use the bits in `run_camera`**
+
+- **Headless multi-target mission** (seek each color with bit `1`, then fire the laser per `--laser-fire-sec`):  
+  `python run_camera.py --shoot-mission`  
+  Uses `state.load_target_bits()` at startup (gesture SEND or manual `state_target_bits.json` / `state.py` defaults).
+
+- **Live preview** — with a **serial** port, the preview **watches** `state_target_bits.json`. After **gesture SEND** (or any edit that changes the file), it **starts seeking** the first color with bit `1` whenever you are not already seeking or in laser-follow. You do **not** need `--seek-from-state` for that (optional: `--seek-from-state` only forces an initial seek at startup).
+
+- **Live preview** — optional startup seek for the **first** color with bit `1`:  
+  `python run_camera.py --seek-from-state`  
+  Same order as `TARGET_NAMES` (red → green → blue → yellow).
+
+- **Live preview — chain missions from the bit file:** after each successful lock, hold the laser for **`--laser-fire-sec`** (default 1s), clear that color’s bit in `state`, then automatically seek the **next** color with bit `1` (or stop when empty):  
+  `python run_camera.py --seek-from-state --mission-chain`  
+  You can also use **`--mission-chain`** with **R / B / G / Y** instead of `--seek-from-state`.
+
+You can still edit **`TARGET_BITS`** in `state.py` or **`state_target_bits.json`** by hand; the next `load_target_bits()` call will pick up the JSON file if present.
+
 ## Troubleshooting
 
 - **Checkpoint not found:** Ensure the two files exist under `artifacts/` or pass explicit paths.
 - **Wrong or black camera:** Try `--camera 0`, `1`, …
 - **Slow:** Use `--every-n` or `--device cuda` if available.
+- **`AttributeError: module 'mediapipe' has no attribute 'solutions'`:** You have mediapipe **0.10+**; use the updated `src/gestureClient.py` (Tasks API), not the legacy `solutions` sample code.
 
 - # Jetson Dino Classification Server
 

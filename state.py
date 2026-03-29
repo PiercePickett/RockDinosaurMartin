@@ -2,16 +2,69 @@
 Shared caveman phrase map, gesture-to-command mapping, and classifier index table.
 
 Imported by:
+  - run_camera.py              (preview + ``--shoot-mission``)
+  - src/gestureClient.py       (writes TARGET_BITS on SEND)
   - src/caveman_controller.py  (runtime)
   - setup_and_test_voice.py    (voice testing)
+
+Cross-process control: ``save_target_bits`` / ``load_target_bits`` persist
+``TARGET_BITS`` to ``state_target_bits.json`` next to this file so the gesture
+program and ``run_camera`` (separate processes) share the same mission bits.
 """
 
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
 TARGET_NAMES = ("red", "green", "blue", "yellow")
+
+_RUNTIME_FILE = Path(__file__).resolve().with_name("state_target_bits.json")
+
+
+def runtime_bits_path() -> Path:
+    """Path to ``state_target_bits.json`` (e.g. for mtime polling from ``run_camera``)."""
+    return _RUNTIME_FILE
 
 # Shoot-mission order: for each index, 1 = find and shoot this color, 0 = skip.
 # Same order as TARGET_NAMES — red, green, blue, yellow.
 # Used by ``python run_camera.py --shoot-mission`` (requires serial + Arduino laser).
+# At runtime, prefer ``load_target_bits()`` so values from ``state_target_bits.json``
+# (written by the gesture client on SEND) override these defaults.
 TARGET_BITS = [1, 0, 1, 0]
+
+
+def load_target_bits() -> list[int]:
+    """Return [R,G,B,Y] bits from ``state_target_bits.json`` if valid.
+
+    If the file is missing or unreadable, it is **created** from the current
+    ``TARGET_BITS`` values in this module (defaults ``[1, 0, 1, 0]`` unless
+    you edited them before calling ``load_target_bits``).
+    """
+    if _RUNTIME_FILE.is_file():
+        try:
+            data = json.loads(_RUNTIME_FILE.read_text(encoding="utf-8"))
+            bits = data.get("TARGET_BITS")
+            if isinstance(bits, list) and len(bits) >= 4:
+                return [1 if int(x) else 0 for x in bits[:4]]
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            pass
+    seeded = [1 if int(x) else 0 for x in TARGET_BITS[:4]]
+    save_target_bits(seeded)
+    return seeded
+
+
+def save_target_bits(bits: list[int]) -> None:
+    """Persist [R,G,B,Y] to ``state_target_bits.json`` and update ``TARGET_BITS`` in-memory."""
+    b = [1 if int(x) else 0 for x in bits[:4]]
+    while len(b) < 4:
+        b.append(0)
+    b = b[:4]
+    TARGET_BITS[:] = b
+    _RUNTIME_FILE.write_text(
+        json.dumps({"TARGET_BITS": b}, indent=2) + "\n",
+        encoding="utf-8",
+    )
 
 # Classifier class name -> bit-array index  [R, G, B, Y]
 CLASS_TO_TARGET_IDX = {

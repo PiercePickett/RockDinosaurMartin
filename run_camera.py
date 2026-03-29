@@ -10,7 +10,7 @@ For best results, train on **similar center crops** (same camera FOV and ROI fra
 
 Capture requests **1920×1080**, then after **rotation** the frame is **center-cropped to 16:9 landscape** (edges removed as needed). The classifier ROI is a square **at most 480×480** px, **centered horizontally** and by default **aligned to the bottom** of the view (see `--roi-vertical`).
 
-Defaults: **camera index 3**, **90°** rotation, **`--device cpu`** (avoids slow CUDA probing; use **`--device auto`** or **`cuda`** for GPU). **Serial** is prompted at startup (empty = camera only), except **`--seek COLOR`** / **`--shoot-mission`** headless modes (port required). Quit: Q/Esc. **0–9** cameras. **P** view rotate. **R/B/G/Y** servo seek. **`--seek COLOR`** or **`--shoot-mission`** (uses `state.TARGET_BITS`) run blocking sweeps with no GUI. Flash **sketch_mar28a.ino** (115200 baud).
+Defaults: **camera index 3**, **90°** rotation, **`--device cpu`** (avoids slow CUDA probing; use **`--device auto`** or **`cuda`** for GPU). **Serial** is prompted at startup (empty = camera only), except **`--seek COLOR`** / **`--shoot-mission`** headless modes (port required). Quit: Q/Esc. **0–9** cameras. **P** view rotate. **R/B/G/Y** servo seek. **`--seek COLOR`**, **`--shoot-mission`**, **`--seek-from-state`**, or **`--mission-chain`** (preview: lock → laser ``--laser-fire-sec`` → clear bit → seek next) tie the camera to shared mission bits. Flash **sketch_mar28a.ino** (115200 baud).
 """
 
 from __future__ import annotations
@@ -256,18 +256,19 @@ def run_headless_seek(
 
 def run_shoot_mission(args: argparse.Namespace) -> int:
     """
-    Read ``state.TARGET_BITS`` (same order as ``state.TARGET_NAMES``: red, green, blue, yellow).
+    Read ``state.load_target_bits()`` (same order as ``state.TARGET_NAMES``: red, green, blue, yellow).
     For each bit set, run headless seek, then laser ON for ``args.laser_fire_sec``, then OFF.
     """
     import state
 
-    bits = list(getattr(state, "TARGET_BITS", []))
+    bits = state.load_target_bits()
     names = tuple(getattr(state, "TARGET_NAMES", ("red", "green", "blue", "yellow")))
     n = min(len(bits), len(names))
     queue = [names[i] for i in range(n) if bits[i]]
     if not queue:
         print(
-            "state.TARGET_BITS has no targets (all zeros). Edit state.py.",
+            "No targets set (all bits zero). Use the gesture client SEND, call "
+            "state.save_target_bits(...) from Python, or edit state.py / state_target_bits.json.",
             file=sys.stderr,
         )
         return 1
@@ -338,6 +339,18 @@ def run_shoot_mission(args: argparse.Namespace) -> int:
             time.sleep(fire)
             send_laser(ser, False)
             print("Laser OFF.", flush=True)
+            cur = list(state.load_target_bits())
+            try:
+                bi = names.index(color)
+            except ValueError:
+                bi = -1
+            if 0 <= bi < len(cur):
+                cur[bi] = 0
+                state.save_target_bits(cur)
+                print(
+                    f"Cleared bit for {color!r}; state TARGET_BITS = {cur}",
+                    flush=True,
+                )
     finally:
         send_laser(ser, False)
         cap.release()
@@ -345,6 +358,39 @@ def run_shoot_mission(args: argparse.Namespace) -> int:
 
     print("\nAll targeted dinosaurs shot. Mission complete.")
     return 0
+
+
+def start_seek_for_next_mission_bit(
+    ser,
+    class_names: list[str],
+    sweep_angles: list[int],
+    args: argparse.Namespace,
+) -> SeekState | None:
+    """Begin interactive seek for the first color with bit 1 in ``state.load_target_bits()``."""
+    import state
+
+    bits = state.load_target_bits()
+    for j, name in enumerate(state.TARGET_NAMES):
+        if not bits[j]:
+            continue
+        ix = class_index_for_color(class_names, name)
+        if ix is None or class_names[ix].lower() == "none":
+            continue
+        seek = SeekState(target_i=ix, label=class_names[ix])
+        seek.sweep_idx = 0
+        t0 = time.monotonic()
+        send_servo_angle(ser, sweep_angles[seek.sweep_idx])
+        seek.settle_until = t0 + args.seek_settle
+        seek.next_angle_time = t0 + args.seek_settle + args.seek_per_angle_sec
+        seek.frames_at_angle = 0
+        seek.hits = 0
+        print(
+            f"Seeking {name!r} (TARGET_BITS={bits})",
+            flush=True,
+        )
+        return seek
+    print("No targets left in state (all bits zero).", flush=True)
+    return None
 
 
 def _try_windows_directshow_names() -> list[str] | None:
@@ -681,6 +727,19 @@ def parse_args() -> argparse.Namespace:
         help="Headless: sweep servo until this color is found, then exit (no GUI). Requires serial.",
     )
     p.add_argument(
+        "--seek-from-state",
+        action="store_true",
+        help="Interactive: after startup, start seek for the first color with bit 1 in "
+        "state.load_target_bits() (gesture SEND / state_target_bits.json). Requires serial.",
+    )
+    p.add_argument(
+        "--mission-chain",
+        action="store_true",
+        help="Interactive (requires serial): after each successful seek, hold laser ON for "
+        "--laser-fire-sec, clear that color's bit in state, then seek the next color with bit 1 "
+        "(or stop when empty). Use with --seek-from-state and/or R/B/G/Y.",
+    )
+    p.add_argument(
         "--seek-angle-step",
         type=int,
         default=1,
@@ -745,7 +804,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--shoot-mission",
         action="store_true",
-        help="Read state.TARGET_BITS [R,G,B,Y]; for each 1, seek that color then laser ON for "
+        help="Read state.load_target_bits() [R,G,B,Y]; for each 1, seek that color then laser ON for "
         "--laser-fire-sec (requires serial, no GUI).",
     )
     p.add_argument(
@@ -753,7 +812,8 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=1.0,
         dest="laser_fire_sec",
-        help="With --shoot-mission: seconds to hold the laser on after each lock (default 1).",
+        help="After each lock: seconds to hold laser ON (--shoot-mission; --mission-chain in preview). "
+        "Default 1.",
     )
     return p.parse_args()
 
@@ -933,9 +993,94 @@ def main() -> int:
     last_laser_sent: bool | None = None
     lost_streak: int = 0  # frames without target after lock; triggers re-sweep
     resume_sweep_idx: int | None = None  # sweep index when seek last locked; used to resume after loss
+    mission_shoot_until: float | None = None  # --mission-chain: monotonic time when fixed laser ends
+    mission_shoot_class_i: int | None = None
 
     print(
         "Q/Esc quit | P rotate | R/B/G/Y seek | X cancel seek | 0–9 camera",
+    )
+    if args.mission_chain and ser is not None:
+        print(
+            f"Mission chain: after each lock → laser {args.laser_fire_sec:.2f}s → clear bit → "
+            "seek next in state.",
+            flush=True,
+        )
+    elif args.mission_chain and ser is None:
+        print(
+            "--mission-chain ignored (no serial port).",
+            file=sys.stderr,
+        )
+
+    if args.seek_from_state and ser is not None:
+        import state
+
+        bits = state.load_target_bits()
+        names = state.TARGET_NAMES
+        started = False
+        for i in range(min(len(bits), len(names))):
+            if not bits[i]:
+                continue
+            col = names[i]
+            ix = class_index_for_color(class_names, col)
+            if ix is None:
+                print(
+                    f"seek-from-state: no class for {col!r} in {class_names}",
+                    file=sys.stderr,
+                )
+                continue
+            if class_names[ix].lower() == "none":
+                print("seek-from-state: cannot seek class 'none'.", file=sys.stderr)
+                continue
+            send_laser(ser, False)
+            last_laser_sent = False
+            laser_follow_class_i = None
+            lost_streak = 0
+            resume_sweep_idx = None
+            seek = SeekState(target_i=ix, label=class_names[ix])
+            seek.sweep_idx = 0
+            t0 = time.monotonic()
+            send_servo_angle(ser, sweep_angles[seek.sweep_idx])
+            seek.settle_until = t0 + args.seek_settle
+            seek.next_angle_time = t0 + args.seek_settle + args.seek_per_angle_sec
+            seek.frames_at_angle = 0
+            seek.hits = 0
+            ema_probs = None
+            frame_idx = 0
+            print(
+                f"Seek from state bits {bits}: {seek.label} "
+                f"(step {args.seek_angle_step}° / {args.seek_settle}s settle)"
+            )
+            started = True
+            break
+        if not started:
+            if any(bits[:4]):
+                print(
+                    "seek-from-state: bits are set but no matching class — check class_names.json.",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    "seek-from-state: no targets (all bits zero). Use gesture SEND or edit state.",
+                    file=sys.stderr,
+                )
+    elif args.seek_from_state and ser is None:
+        print(
+            "seek-from-state ignored (no serial port). Restart with a COM port.",
+            file=sys.stderr,
+        )
+
+    import state as _state_mod
+
+    _bits_path = _state_mod.runtime_bits_path()
+    _b0 = _state_mod.load_target_bits()
+    last_bits_snapshot: tuple[int, int, int, int] = (
+        int(_b0[0]),
+        int(_b0[1]),
+        int(_b0[2]),
+        int(_b0[3]),
+    )
+    last_state_bits_mtime_ns: int | None = (
+        int(_bits_path.stat().st_mtime_ns) if _bits_path.is_file() else None
     )
 
     while True:
@@ -946,6 +1091,72 @@ def main() -> int:
                 send_laser(ser, False)
                 last_laser_sent = False
             break
+
+        now_mono = time.monotonic()
+        if (
+            args.mission_chain
+            and ser is not None
+            and mission_shoot_until is not None
+            and mission_shoot_class_i is not None
+            and now_mono >= mission_shoot_until
+        ):
+            send_laser(ser, False)
+            last_laser_sent = False
+            import state
+
+            bits = list(state.load_target_bits())
+            cn = class_names[mission_shoot_class_i].lower()
+            bi = state.CLASS_TO_TARGET_IDX.get(cn)
+            if bi is not None:
+                bits[bi] = 0
+                state.save_target_bits(bits)
+                print(
+                    f"Mission: cleared bit for {cn}; TARGET_BITS={bits}",
+                    flush=True,
+                )
+            mission_shoot_until = None
+            mission_shoot_class_i = None
+            seek = start_seek_for_next_mission_bit(
+                ser, class_names, sweep_angles, args
+            )
+            laser_follow_class_i = None
+            lost_streak = 0
+            ema_probs = None
+            frame_idx = 0
+
+        # Gesture SEND (or any writer) updates state_target_bits.json — detect mtime or bit
+        # changes so preview starts seeking without --seek-from-state or R/B/G/Y.
+        if (
+            ser is not None
+            and seek is None
+            and laser_follow_class_i is None
+            and mission_shoot_until is None
+            and _bits_path.is_file()
+        ):
+            bits = _state_mod.load_target_bits()
+            t = (int(bits[0]), int(bits[1]), int(bits[2]), int(bits[3]))
+            m_ns = int(_bits_path.stat().st_mtime_ns)
+            state_changed = (last_state_bits_mtime_ns is None or m_ns != last_state_bits_mtime_ns) or (
+                t != last_bits_snapshot
+            )
+            if state_changed:
+                last_state_bits_mtime_ns = m_ns
+                last_bits_snapshot = t
+                if any(t):
+                    new_seek = start_seek_for_next_mission_bit(
+                        ser, class_names, sweep_angles, args
+                    )
+                    if new_seek is not None:
+                        seek = new_seek
+                        laser_follow_class_i = None
+                        lost_streak = 0
+                        resume_sweep_idx = None
+                        ema_probs = None
+                        frame_idx = 0
+                        print(
+                            "Started seek from updated state (gesture SEND / file).",
+                            flush=True,
+                        )
 
         frame = apply_rotation(frame, rot_k)
         frame = crop_to_horizontal_16_9(frame)
@@ -984,8 +1195,7 @@ def main() -> int:
                 last_conf = conf
 
             if seek is not None and ser is not None:
-                now = time.monotonic()
-                if now >= seek.settle_until:
+                if now_mono >= seek.settle_until:
                     seek.frames_at_angle += 1
                     conf_t = float(probs[seek.target_i].item())
                     pi = int(probs.argmax().item())
@@ -1000,19 +1210,30 @@ def main() -> int:
                             f"(P({seek.label})={conf_t:.2f})"
                         )
                         resume_sweep_idx = seek.sweep_idx
-                        laser_follow_class_i = seek.target_i
+                        locked_i = seek.target_i
                         seek = None
                         lost_streak = 0
+                        if args.mission_chain and ser is not None:
+                            laser_follow_class_i = None
+                            mission_shoot_class_i = locked_i
+                            mission_shoot_until = now_mono + float(args.laser_fire_sec)
+                            print(
+                                f"Mission: locked on {class_names[locked_i]}; "
+                                f"laser {args.laser_fire_sec:.2f}s then next in state…",
+                                flush=True,
+                            )
+                        else:
+                            laser_follow_class_i = locked_i
                     elif (
-                        now >= seek.next_angle_time
+                        now_mono >= seek.next_angle_time
                         or seek.frames_at_angle >= args.seek_max_frames
                     ):
                         seek.sweep_idx = (seek.sweep_idx + 1) % len(sweep_angles)
                         nang = sweep_angles[seek.sweep_idx]
                         send_servo_angle(ser, nang)
-                        seek.settle_until = now + args.seek_settle
+                        seek.settle_until = now_mono + args.seek_settle
                         seek.next_angle_time = (
-                            now + args.seek_settle + args.seek_per_angle_sec
+                            now_mono + args.seek_settle + args.seek_per_angle_sec
                         )
                         seek.frames_at_angle = 0
                         seek.hits = 0
@@ -1055,19 +1276,37 @@ def main() -> int:
                         frame_idx = 0
 
             if ser is not None:
-                t = seek.target_i if seek is not None else laser_follow_class_i
-                if t is None:
-                    desired_laser = False
+                if (
+                    args.mission_chain
+                    and mission_shoot_until is not None
+                    and now_mono < mission_shoot_until
+                ):
+                    desired_laser = True
                 else:
-                    thr = (
-                        args.seek_min_confidence
-                        if seek is not None
-                        else args.min_confidence
-                    )
-                    desired_laser = laser_on_for_target(probs, t, min_prob=thr)
+                    t = seek.target_i if seek is not None else laser_follow_class_i
+                    if t is None:
+                        desired_laser = False
+                    else:
+                        thr = (
+                            args.seek_min_confidence
+                            if seek is not None
+                            else args.min_confidence
+                        )
+                        desired_laser = laser_on_for_target(probs, t, min_prob=thr)
                 if desired_laser != last_laser_sent:
                     send_laser(ser, desired_laser)
                     last_laser_sent = desired_laser
+
+        if (
+            ser is not None
+            and args.mission_chain
+            and mission_shoot_until is not None
+            and now_mono < mission_shoot_until
+            and not run_infer
+        ):
+            if last_laser_sent is not True:
+                send_laser(ser, True)
+                last_laser_sent = True
 
         draw_roi_crosshair(frame, x1, y1, x2, y2)
 
@@ -1085,6 +1324,12 @@ def main() -> int:
 
         if seek is not None:
             sought_str = seek.label
+        elif (
+            mission_shoot_class_i is not None
+            and mission_shoot_until is not None
+            and now_mono < mission_shoot_until
+        ):
+            sought_str = f"{class_names[mission_shoot_class_i]} (shoot)"
         elif laser_follow_class_i is not None:
             sought_str = class_names[laser_follow_class_i]
         else:
@@ -1157,15 +1402,23 @@ def main() -> int:
             frame_idx = 0
             print(f"View rotation: {rot_k * 90}° CW")
 
-        if key in (ord("x"), ord("X")) and seek is not None:
-            if ser is not None:
-                send_laser(ser, False)
-                last_laser_sent = False
-            laser_follow_class_i = None
-            seek = None
-            lost_streak = 0
-            resume_sweep_idx = None
-            print("Seek cancelled.")
+        if key in (ord("x"), ord("X")):
+            if mission_shoot_until is not None:
+                if ser is not None:
+                    send_laser(ser, False)
+                    last_laser_sent = False
+                mission_shoot_until = None
+                mission_shoot_class_i = None
+                print("Mission shoot cancelled.", flush=True)
+            elif seek is not None:
+                if ser is not None:
+                    send_laser(ser, False)
+                    last_laser_sent = False
+                laser_follow_class_i = None
+                seek = None
+                lost_streak = 0
+                resume_sweep_idx = None
+                print("Seek cancelled.")
 
         color_key = {ord("r"): "red", ord("R"): "red", ord("b"): "blue", ord("B"): "blue",
                      ord("g"): "green", ord("G"): "green", ord("y"): "yellow", ord("Y"): "yellow"}
@@ -1180,6 +1433,12 @@ def main() -> int:
                 elif class_names[ix].lower() == "none":
                     print("Cannot seek class 'none'.", file=sys.stderr)
                 else:
+                    if mission_shoot_until is not None:
+                        if ser is not None:
+                            send_laser(ser, False)
+                            last_laser_sent = False
+                        mission_shoot_until = None
+                        mission_shoot_class_i = None
                     laser_follow_class_i = None
                     lost_streak = 0
                     resume_sweep_idx = None
