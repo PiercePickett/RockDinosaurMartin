@@ -84,6 +84,8 @@ class SeekState:
     hits: int = 0
     settle_until: float = 0.0
     frames_at_angle: int = 0
+    # Earliest time to advance to next angle (after servo settle + scoring budget).
+    next_angle_time: float = 0.0
 
 
 def prompt_serial_port() -> str | None:
@@ -112,6 +114,23 @@ def open_servo_serial(port: str, wait_after_open: float = 0.5):
 def send_servo_angle(ser, angle: int) -> None:
     ser.write(f"{int(angle)}\n".encode("ascii"))
     ser.flush()
+
+
+def send_laser(ser, on: bool) -> None:
+    """Arduino sketch: L1 = laser on (pin A2), L0 = off."""
+    ser.write(b"L1\n" if on else b"L0\n")
+    ser.flush()
+
+
+def laser_on_for_target(
+    probs: Any,
+    target_i: int,
+    *,
+    min_prob: float,
+) -> bool:
+    """True iff ROI softmax says target class is top-1 and P(target) >= min_prob."""
+    pi = int(probs.argmax().item())
+    return pi == target_i and float(probs[target_i].item()) >= min_prob
 
 
 def class_index_for_color(class_names: list[str], color: str) -> int | None:
@@ -155,6 +174,9 @@ def run_headless_seek(
     target_i = ix
     print("Headless seek:", class_names[target_i], "| sweeps:", len(sweep_lists))
 
+    send_laser(ser, False)
+    last_laser_on: bool | None = False
+
     found_angle: int | None = None
 
     try:
@@ -189,6 +211,13 @@ def run_headless_seek(
                     conf = float(probs[target_i].item())
                     pred_i = int(probs.argmax().item())
 
+                    desired_laser = laser_on_for_target(
+                        probs, target_i, min_prob=args.seek_min_confidence
+                    )
+                    if desired_laser != last_laser_on:
+                        send_laser(ser, desired_laser)
+                        last_laser_on = desired_laser
+
                     if pred_i == target_i and conf >= args.seek_min_confidence:
                         hits += 1
                         print(
@@ -211,7 +240,7 @@ def run_headless_seek(
             if found_angle is not None:
                 break
     finally:
-        pass
+        send_laser(ser, False)
 
     if found_angle is not None:
         send_servo_angle(ser, found_angle)
@@ -531,13 +560,13 @@ def parse_args() -> argparse.Namespace:
         "--seek-angle-step",
         type=int,
         default=1,
-        help="Servo degrees per step (interactive R/B/G/Y and --seek). Default 1°; pair with --seek-settle for overall slew rate.",
+        help="Servo degrees per step (interactive R/B/G/Y and --seek). Default 1° (use 5 for coarser steps).",
     )
     p.add_argument(
         "--seek-settle",
         type=float,
-        default=0.02,
-        help="Seconds after each servo move before scoring (interactive seek). Default 0.02s with 1° steps ≈ same °/s as old 5°/0.1s.",
+        default=0.1,
+        help="Seconds after each servo move before scoring (interactive seek). Default 0.1s.",
     )
     p.add_argument(
         "--seek-min-confidence",
@@ -555,7 +584,15 @@ def parse_args() -> argparse.Namespace:
         "--seek-max-frames",
         type=int,
         default=35,
-        help="Max frames per angle in headless --seek mode.",
+        help="Max inference frames per angle (safety cap). Interactive seek advances when "
+        "this is reached OR after --seek-settle + --seek-per-angle-sec (whichever first).",
+    )
+    p.add_argument(
+        "--seek-per-angle-sec",
+        type=float,
+        default=0.0,
+        help="Interactive seek only: extra time after --seek-settle before stepping to the next "
+        "angle (0 = advance as soon as settle ends and one frame is scored; larger = slower).",
     )
     p.add_argument(
         "--seek-forward-only",
@@ -644,7 +681,7 @@ def main() -> int:
             return 1
         tfm = make_transform(image_size)
         _progress(f"Opening camera index {args.camera} for headless seek…")
-        cap = cv2.VideoCapture(int(args.camera))
+        cap = open_camera_capture(int(args.camera))
         if not cap.isOpened():
             print(f"Could not open camera {args.camera}", file=sys.stderr)
             ser.close()
@@ -739,6 +776,9 @@ def main() -> int:
     last_conf = 0.0
     rot_k = 1  # 0,1,2,3 → 0°,90°,180°,270° clockwise; default 1 = 90° CW
     seek: SeekState | None = None
+    # After seek succeeds: keep laser tied to live ROI until a new seek / cancel.
+    laser_follow_class_i: int | None = None
+    last_laser_sent: bool | None = None
 
     print(
         "Q/Esc quit | P rotate | R/B/G/Y seek | X cancel seek | 0–9 camera",
@@ -748,6 +788,9 @@ def main() -> int:
         ok, frame = cap.read()
         if not ok:
             print("Frame grab failed; exiting.", file=sys.stderr)
+            if ser is not None:
+                send_laser(ser, False)
+                last_laser_sent = False
             break
 
         frame = apply_rotation(frame, rot_k)
@@ -801,14 +844,36 @@ def main() -> int:
                             f"Seek done: {seek.label} @ servo {cur_ang}° "
                             f"(P({seek.label})={conf_t:.2f})"
                         )
+                        laser_follow_class_i = seek.target_i
                         seek = None
-                    elif seek.frames_at_angle >= args.seek_max_frames:
+                    elif (
+                        now >= seek.next_angle_time
+                        or seek.frames_at_angle >= args.seek_max_frames
+                    ):
                         seek.sweep_idx = (seek.sweep_idx + 1) % len(sweep_angles)
                         nang = sweep_angles[seek.sweep_idx]
                         send_servo_angle(ser, nang)
                         seek.settle_until = now + args.seek_settle
+                        seek.next_angle_time = (
+                            now + args.seek_settle + args.seek_per_angle_sec
+                        )
                         seek.frames_at_angle = 0
                         seek.hits = 0
+
+            if ser is not None:
+                t = seek.target_i if seek is not None else laser_follow_class_i
+                if t is None:
+                    desired_laser = False
+                else:
+                    thr = (
+                        args.seek_min_confidence
+                        if seek is not None
+                        else args.min_confidence
+                    )
+                    desired_laser = laser_on_for_target(probs, t, min_prob=thr)
+                if desired_laser != last_laser_sent:
+                    send_laser(ser, desired_laser)
+                    last_laser_sent = desired_laser
 
         draw_roi_crosshair(frame, x1, y1, x2, y2)
 
@@ -823,15 +888,51 @@ def main() -> int:
             2,
             cv2.LINE_AA,
         )
+
+        if seek is not None:
+            sought_str = seek.label
+        elif laser_follow_class_i is not None:
+            sought_str = class_names[laser_follow_class_i]
+        else:
+            sought_str = "—"
+
+        if ser is None:
+            laser_str = "n/a (no serial)"
+            laser_color = (140, 140, 140)
+        else:
+            laser_on = bool(last_laser_sent)
+            laser_str = "ON" if laser_on else "OFF"
+            laser_color = (0, 255, 0) if laser_on else (160, 160, 160)
+
+        cv2.putText(
+            frame,
+            f"Sought: {sought_str}",
+            (16, 72),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.72,
+            (0, 220, 255),
+            2,
+            cv2.LINE_AA,
+        )
+        cv2.putText(
+            frame,
+            f"Laser: {laser_str}",
+            (16, 108),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.72,
+            laser_color,
+            2,
+            cv2.LINE_AA,
+        )
         if seek is not None:
             sa = sweep_angles[seek.sweep_idx]
-            seek_hud = f"SEEK {seek.label}  servo={sa}°  hits={seek.hits}/{args.seek_hits}"
+            seek_hud = f"Sweep: servo={sa}°  hits={seek.hits}/{args.seek_hits}"
             cv2.putText(
                 frame,
                 seek_hud,
-                (16, 72),
+                (16, 144),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.75,
+                0.65,
                 (0, 165, 255),
                 2,
                 cv2.LINE_AA,
@@ -851,6 +952,9 @@ def main() -> int:
         cv2.imshow("dinosaur classifier (center ROI)", frame)
         key = cv2.waitKey(1) & 0xFF
         if key in (ord("q"), ord("Q"), 27):
+            if ser is not None:
+                send_laser(ser, False)
+                last_laser_sent = False
             break
 
         if key in (ord("p"), ord("P")):
@@ -860,6 +964,10 @@ def main() -> int:
             print(f"View rotation: {rot_k * 90}° CW")
 
         if key in (ord("x"), ord("X")) and seek is not None:
+            if ser is not None:
+                send_laser(ser, False)
+                last_laser_sent = False
+            laser_follow_class_i = None
             seek = None
             print("Seek cancelled.")
 
@@ -876,10 +984,16 @@ def main() -> int:
                 elif class_names[ix].lower() == "none":
                     print("Cannot seek class 'none'.", file=sys.stderr)
                 else:
+                    laser_follow_class_i = None
+                    if ser is not None:
+                        send_laser(ser, False)
+                        last_laser_sent = False
                     seek = SeekState(target_i=ix, label=class_names[ix])
                     seek.sweep_idx = 0
+                    t0 = time.monotonic()
                     send_servo_angle(ser, sweep_angles[seek.sweep_idx])
-                    seek.settle_until = time.monotonic() + args.seek_settle
+                    seek.settle_until = t0 + args.seek_settle
+                    seek.next_angle_time = t0 + args.seek_settle + args.seek_per_angle_sec
                     seek.frames_at_angle = 0
                     seek.hits = 0
                     ema_probs = None

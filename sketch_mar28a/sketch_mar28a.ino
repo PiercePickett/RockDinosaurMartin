@@ -3,14 +3,21 @@
 // Servo on analog-capable pin (bit-banged PWM)
 const int servoPin = A1;
 
+// Laser driver (e.g. transistor/MOSFET module): HIGH = on, LOW = off
+const int laserPin = A2;
+
 // Servo pulse widths in microseconds (matches your original map range)
 const int SERVO_MIN = 0;
 const int SERVO_MAX = 3000;
 
 int targetAngle = 90;
+bool laserOn = false;
 
 void setup() {
   pinMode(servoPin, OUTPUT);
+  pinMode(laserPin, OUTPUT);
+  digitalWrite(laserPin, LOW);
+
   Serial.begin(115200);
   delay(300);
   // Hold center briefly
@@ -38,9 +45,23 @@ void loop() {
     String line = Serial.readStringUntil('\n');
     line.trim();
     if (line.length() > 0) {
-      int v = line.toInt();
-      targetAngle = constrain(v, 0, 180);
+      char c0 = line.charAt(0);
+      // Host: L1 = sought class currently seen in ROI, L0 = otherwise
+      if (c0 == 'L' || c0 == 'l') {
+        if (line.length() >= 2) {
+          char c1 = line.charAt(1);
+          if (c1 == '1')
+            laserOn = true;
+          else if (c1 == '0')
+            laserOn = false;
+        }
+      } else {
+        int v = line.toInt();
+        targetAngle = constrain(v, 0, 180);
+      }
     }
   }
+
+  digitalWrite(laserPin, laserOn ? HIGH : LOW);
   servoWrite(targetAngle);
 }
