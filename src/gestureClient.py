@@ -4,7 +4,7 @@ import socket
 import time
 
 # --- 1. Network Setup ---
-SERVER_IP = "0.0.0.0"
+SERVER_IP = "127.0.0.1"
 PORT = 8000
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
@@ -94,21 +94,19 @@ while cap.isOpened():
             elif command_mode:
 
                 if current_gesture == "1/0":   # RED
-                    # command_bits = [1, 0, 0, 0]
-                    command_bits[0] = 1
+                    command_bits = [1, 0, 0, 0]
 
-                elif current_gesture == "2/0": # GREEN
-                    # command_bits = [0, 1, 0, 0]
-                    command_bits[1] = 1
+                elif current_gesture == "3/0": # GREEN
+                    command_bits = [0, 1, 0, 0]
 
-                elif current_gesture == "3/0": # BLUE
-                    command_bits[2] = 1
+                elif current_gesture == "4/0": # BLUE
+                    command_bits = [0, 0, 1, 0]
 
-                elif current_gesture == "4/0": # YELLOW
-                    command_bits[3] = 1
+                elif current_gesture == "2/0": # YELLOW
+                    command_bits = [0, 0, 0, 1]
 
                 elif current_gesture == "0/4": # INVERT
-                    command_bits = [1 ^ b for b in command_bits]
+                    command_bits = [1 - b for b in command_bits]
 
                 elif current_gesture == "0/0": # NONE
                     command_bits = [0, 0, 0, 0]
