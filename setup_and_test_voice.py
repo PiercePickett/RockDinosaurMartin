@@ -23,10 +23,11 @@ import sys
 # Step 1 — Install dependencies
 # ---------------------------------------------------------------------------
 
+# elevenlabs>=1.x has PyPI wheels for Python 3.13 on Windows (old 0.3.x pulled pydantic-core source builds).
 REQUIRED_PACKAGES = [
-    "elevenlabs==0.3.0b0",
-    "python-dotenv",
-    "pygame",
+    "elevenlabs>=1.50.0",
+    "python-dotenv>=1.0.0",
+    "pygame>=2.5.0",
 ]
 
 
@@ -34,7 +35,7 @@ def install_packages() -> None:
     print("Installing required packages ...")
     for pkg in REQUIRED_PACKAGES:
         subprocess.check_call(
-            [sys.executable, "-m", "pip", "install", "--quiet", pkg]
+            [sys.executable, "-m", "pip", "install", "--upgrade", "--quiet", pkg]
         )
     print("All packages installed.\n")
 
@@ -52,10 +53,10 @@ def load_env() -> None:
 
 
 def save_env(api_key: str, voice_id: str) -> None:
-    with open(ENV_PATH, "w") as f:
-        f.write("# RockDinosaurMartin API Keys\n")
+    with open(ENV_PATH, "w", encoding="utf-8") as f:
+        f.write("# RockDinosaurMartin — ElevenLabs (used by caveman_voice.py)\n")
         f.write(f"ELEVENLABS_API_KEY={api_key}\n")
-        f.write(f"ELEVENLABS_VOICE_ID={voice_id}\n")
+        f.write(f"G5uOcBecoT17CX53fnzP={voice_id}\n")
     print(f"Saved to {ENV_PATH}\n")
 
 
@@ -88,13 +89,18 @@ def get_api_key() -> str:
 
 
 def list_voices() -> None:
-    from elevenlabs import voices as get_voices
-    all_voices = get_voices(api_key=get_api_key())
+    from elevenlabs.client import ElevenLabs
+
+    client = ElevenLabs(api_key=get_api_key())
+    resp = client.voices.search()
+    all_voices = getattr(resp, "voices", None) or []
     print("\nAvailable voices on your account:")
     print(f"  {'Name':<30} {'Voice ID'}")
     print("  " + "-" * 62)
     for v in all_voices:
-        print(f"  {v.name:<30} {v.voice_id}")
+        vid = getattr(v, "voice_id", None) or getattr(v, "voiceId", "")
+        name = getattr(v, "name", "") or "(unnamed)"
+        print(f"  {name:<30} {vid}")
     print()
 
 
@@ -102,35 +108,7 @@ def list_voices() -> None:
 # Step 4 — Speak a phrase
 # ---------------------------------------------------------------------------
 
-def speak(text: str, voice_id: str) -> None:
-    """Convert text to speech and play it via pygame."""
-    import io
-    import pygame
-    from elevenlabs import generate, Voice, VoiceSettings
-
-    api_key = os.getenv("ELEVENLABS_API_KEY")
-
-    audio_bytes = generate(
-        text=text,
-        voice=Voice(
-            voice_id=voice_id,
-            settings=VoiceSettings(
-                stability=0.3,
-                similarity_boost=0.8,
-                style=0.6,
-                use_speaker_boost=True,
-            ),
-        ),
-        model="eleven_turbo_v2",
-        api_key=api_key,
-    )
-
-    pygame.mixer.init()
-    sound = pygame.mixer.Sound(io.BytesIO(audio_bytes))
-    sound.play()
-    while pygame.mixer.get_busy():
-        pygame.time.wait(50)
-    pygame.mixer.quit()
+from caveman_voice import speak
 
 
 # ---------------------------------------------------------------------------
@@ -139,7 +117,7 @@ def speak(text: str, voice_id: str) -> None:
 
 def test_all_phrases(voice_id: str) -> None:
     sys.path.insert(0, os.path.dirname(__file__))
-    from command_map import PHRASES
+    from state import PHRASES
 
     total = len(PHRASES)
     print(f"\nTesting {total} phrases ...\n")

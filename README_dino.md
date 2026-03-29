@@ -71,6 +71,8 @@ Tune with **`--seek-angle-step`**, **`--seek-settle`**, **`--seek-min-confidence
 
 Class names in `class_names.json` must match (e.g. `"red"`, `"blue"`).
 
+**Caveman voice (optional):** Run **`python setup_and_test_voice.py`** once to install ElevenLabs deps and write **`.env`**. The script pins **`elevenlabs>=1.50`** (works on **Python 3.13** on Windows with prebuilt wheels; the old `0.3.x` SDK could try to compile Rust). **`.env`** must define **`ELEVENLABS_API_KEY`** and **`ELEVENLABS_VOICE_ID`** — if you used an older broken `.env` with random key names, delete it and run setup again. During **`--shoot-mission`** and **`--mission-chain`**, **`caveman_voice.py`** plays **`state.PHRASES`** lines. Use **`--no-voice`** on `run_camera.py` to turn speech off.
+
 ## Gesture client + `state.py` (control `run_camera`)
 
 The gesture program (`src/gestureClient.py`) and `run_camera.py` are **separate processes**, so they do not share Python memory. Mission bits are shared through **`state.py`** helpers and a small runtime file next to it:
@@ -82,7 +84,7 @@ The gesture program (`src/gestureClient.py`) and `run_camera.py` are **separate 
 
 1. From the **repository root** (so `import state` resolves), install deps: `pip install -r requirements.txt` (includes **mediapipe ≥ 0.10** and OpenCV). PyPI’s current `mediapipe` wheel does **not** include the old `mediapipe.solutions` API; this repo uses the **Tasks** `HandLandmarker` instead.
 2. **First run** downloads the hand model (~few MB) into **`.cache/hand_landmarker.task`**. To use your own file, set **`MEDIAPIPE_HAND_MODEL_PATH`** to a `.task` path.
-3. Run the gesture client: `python src/gestureClient.py` (on Windows the script uses **DirectShow** for the default camera index `0`).
+3. Run the gesture client: `python src/gestureClient.py` (on Windows the script uses **DirectShow** for the default camera index `0`). On **SEND**, caveman lines play for each target bit (`cmd_red` …) via **`caveman_voice`**; lines starting with **`[voice]`** in the terminal show each intended play. Use **`--no-voice`** to skip audio (same idea as `run_camera --no-voice`).
 4. Use **attention mode** and finger gestures to build the `[R,G,B,Y]` bit pattern, then **SEND** (`2/2` after dwell). That writes **`state_target_bits.json`** and also sends a **UDP** packet to **`127.0.0.1:8000`** (run **`python src/gestureServer.py`** in another terminal if you want to see it). Override host/port with **`GESTURE_SERVER_HOST`** / **`GESTURE_SERVER_PORT`**.
 
 **Use the bits in `run_camera`**

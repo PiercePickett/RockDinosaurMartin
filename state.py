@@ -2,7 +2,8 @@
 Shared caveman phrase map, gesture-to-command mapping, and classifier index table.
 
 Imported by:
-  - run_camera.py              (preview + ``--shoot-mission``)
+  - run_camera.py              (preview + ``--shoot-mission``; caveman lines via ``caveman_voice``)
+  - caveman_voice.py           (ElevenLabs TTS for ``PHRASES``)
   - src/gestureClient.py       (writes TARGET_BITS on SEND)
   - src/caveman_controller.py  (runtime)
   - setup_and_test_voice.py    (voice testing)

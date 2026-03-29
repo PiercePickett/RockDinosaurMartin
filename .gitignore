@@ -3,3 +3,4 @@ state_target_bits.json
 
 # MediaPipe hand landmarker task (downloaded on first gesture client run)
 .cache/
+.env

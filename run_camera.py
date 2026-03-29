@@ -10,7 +10,7 @@ For best results, train on **similar center crops** (same camera FOV and ROI fra
 
 Capture requests **1920×1080**, then after **rotation** the frame is **center-cropped to 16:9 landscape** (edges removed as needed). The classifier ROI is a square **at most 480×480** px, **centered horizontally** and by default **aligned to the bottom** of the view (see `--roi-vertical`).
 
-Defaults: **camera index 3**, **90°** rotation, **`--device cpu`** (avoids slow CUDA probing; use **`--device auto`** or **`cuda`** for GPU). **Serial** is prompted at startup (empty = camera only), except **`--seek COLOR`** / **`--shoot-mission`** headless modes (port required). Quit: Q/Esc. **0–9** cameras. **P** view rotate. **R/B/G/Y** servo seek. **`--seek COLOR`**, **`--shoot-mission`**, **`--seek-from-state`**, or **`--mission-chain`** (preview: lock → laser ``--laser-fire-sec`` → clear bit → seek next) tie the camera to shared mission bits. Flash **sketch_mar28a.ino** (115200 baud).
+Defaults: **camera index 3**, **90°** rotation, **`--device cpu`** (avoids slow CUDA probing; use **`--device auto`** or **`cuda`** for GPU). **Serial** is prompted at startup (empty = camera only), except **`--seek COLOR`** / **`--shoot-mission`** headless modes (port required). Quit: Q/Esc. **0–9** cameras. **P** view rotate. **R/B/G/Y** servo seek. **`--seek COLOR`**, **`--shoot-mission`**, **`--seek-from-state`**, or **`--mission-chain`** (preview: lock → laser ``--laser-fire-sec`` → clear bit → seek next) tie the camera to shared mission bits. With **`.env`** from **`setup_and_test_voice.py`**, caveman lines from **`state.PHRASES`** play during hunts unless **`--no-voice`**. Flash **sketch_mar28a.ino** (115200 baud).
 """
 
 from __future__ import annotations
@@ -47,6 +47,20 @@ print("run_camera: light imports OK.", flush=True)
 
 def _progress(msg: str) -> None:
     print(msg, flush=True)
+
+
+def _voice_line(args: argparse.Namespace, phrase_key: str) -> None:
+    """Play ``state.PHRASES[phrase_key]`` via ElevenLabs when ``--no-voice`` is not set."""
+    if getattr(args, "no_voice", False):
+        print(f"[voice] run_camera SKIPPED (--no-voice): {phrase_key!r}", flush=True)
+        return
+    try:
+        from caveman_voice import _voice_log, speak_phrase_key
+
+        _voice_log(f"run_camera PLAY: {phrase_key!r}")
+        speak_phrase_key(phrase_key, enabled=True)
+    except Exception as e:
+        print(f"[voice] run_camera error ({phrase_key}): {e}", flush=True)
 
 
 def _import_heavy() -> None:
@@ -317,6 +331,7 @@ def run_shoot_mission(args: argparse.Namespace) -> int:
     try:
         for i, color in enumerate(queue):
             print(f"\n=== Mission {i + 1}/{len(queue)}: seek {color!r} ===")
+            _voice_line(args, f"cmd_{color}")
             rc = run_headless_seek(
                 ser,
                 cap,
@@ -329,16 +344,20 @@ def run_shoot_mission(args: argparse.Namespace) -> int:
                 args,
             )
             if rc != 0:
+                _voice_line(args, "no_target")
                 print(f"Mission failed: could not find {color!r}.", file=sys.stderr)
                 return 1
             print(
                 f"Locked on {color}. Laser ON for {fire:.2f}s (shoot)...",
                 flush=True,
             )
+            _voice_line(args, "target_locked")
             send_laser(ser, True)
+            _voice_line(args, "fired")
             time.sleep(fire)
             send_laser(ser, False)
             print("Laser OFF.", flush=True)
+            _voice_line(args, "target_down")
             cur = list(state.load_target_bits())
             try:
                 bi = names.index(color)
@@ -351,6 +370,7 @@ def run_shoot_mission(args: argparse.Namespace) -> int:
                     f"Cleared bit for {color!r}; state TARGET_BITS = {cur}",
                     flush=True,
                 )
+        _voice_line(args, "all_done")
     finally:
         send_laser(ser, False)
         cap.release()
@@ -815,6 +835,12 @@ def parse_args() -> argparse.Namespace:
         help="After each lock: seconds to hold laser ON (--shoot-mission; --mission-chain in preview). "
         "Default 1.",
     )
+    p.add_argument(
+        "--no-voice",
+        action="store_true",
+        help="Disable ElevenLabs caveman lines from state.PHRASES during --shoot-mission and "
+        "--mission-chain (requires .env from setup_and_test_voice.py otherwise).",
+    )
     return p.parse_args()
 
 
@@ -1114,11 +1140,14 @@ def main() -> int:
                     f"Mission: cleared bit for {cn}; TARGET_BITS={bits}",
                     flush=True,
                 )
+            _voice_line(args, "target_down")
             mission_shoot_until = None
             mission_shoot_class_i = None
             seek = start_seek_for_next_mission_bit(
                 ser, class_names, sweep_angles, args
             )
+            if seek is None:
+                _voice_line(args, "all_done")
             laser_follow_class_i = None
             lost_streak = 0
             ema_probs = None
@@ -1217,6 +1246,8 @@ def main() -> int:
                             laser_follow_class_i = None
                             mission_shoot_class_i = locked_i
                             mission_shoot_until = now_mono + float(args.laser_fire_sec)
+                            _voice_line(args, "target_locked")
+                            _voice_line(args, "fired")
                             print(
                                 f"Mission: locked on {class_names[locked_i]}; "
                                 f"laser {args.laser_fire_sec:.2f}s then next in state…",

@@ -6,6 +6,7 @@ Run from the repo root: ``python src/gestureClient.py``
 """
 from __future__ import annotations
 
+import argparse
 import os
 import socket
 import sys
@@ -103,6 +104,15 @@ def _draw_hand_skeleton(
 
 
 def main() -> None:
+    _ap = argparse.ArgumentParser(add_help=False)
+    _ap.add_argument(
+        "--no-voice",
+        action="store_true",
+        help="Do not play caveman lines on SEND.",
+    )
+    _gargs, _unknown = _ap.parse_known_args()
+    voice_enabled = not _gargs.no_voice
+
     # Create state_target_bits.json from state.TARGET_BITS if missing (same folder as state.py).
     state.load_target_bits()
 
@@ -206,6 +216,9 @@ def main() -> None:
                                 f">>> SENT: {bit_string} "
                                 f"(saved to state / state_target_bits.json) <<<"
                             )
+                            from caveman_voice import speak_command_bits
+
+                            speak_command_bits(command_bits, enabled=voice_enabled)
                             command_mode = False
 
             # When IDLE, show bits from state_target_bits.json so run_camera --shoot-mission
