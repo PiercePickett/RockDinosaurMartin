@@ -18,7 +18,9 @@ pip install -r requirements.txt
 
 Use **Python 3.10+**. A **GPU** is optional; CPU works.
 
-On startup, `run_camera.py` **prints detected cameras** with their index numbers. On Windows, `pip install pygrabber` adds USB **product names** next to each index (optional).
+**Startup speed:** PyTorch is loaded **after** the serial prompt (and after an optional camera scan). By default **camera indices are not scanned** (that scan is often very slow on Windows). Use **`--probe-cameras`** when you need a list of devices. **`--serial-wait`** controls the pause after opening USB serial (default **0.5s**; increase if the Arduino misses commands).
+
+When you start `run_camera.py`, it **asks for the Arduino serial port** first (e.g. `COM3`, or Enter for **camera only**). On Windows, `pip install pygrabber` adds friendly names when you use **`--probe-cameras`**.
 
 ## Model files
 
@@ -29,7 +31,7 @@ Place (or point `--checkpoint` / `--classes` at):
 
 ## Run
 
-**Pipeline:** opens **camera index 3** by default (`--camera` to change). Starts **rotated 90°** clockwise; press **R** to cycle rotation. Capture requests **1920×1080** (actual size is printed). After rotation, **center-crop to 16:9 landscape**. Classification uses a **center square** (side **≤ 480 px**, `--max-roi-side`). Align the toy with the yellow box.
+**Pipeline:** **Serial port prompt** → camera list → preview. Opens **camera index 3** by default (`--camera` to change). Starts **rotated 90°** clockwise; press **P** to cycle view rotation. With a serial port, **R / B / G / Y** start a **fast servo sweep** until that color class locks in the ROI; **X** cancels seek. Capture requests **1920×1080**. After rotation, **16:9** crop; ROI **≤ 480 px** (`--max-roi-side`).
 
 Override defaults: `--camera`, `--capture-width`, `--capture-height`, `--max-roi-side`, `--roi-fraction`.
 
@@ -53,6 +55,21 @@ Custom paths:
 ```bash
 python run_camera.py --checkpoint path/to/model.pt --classes path/to/class_names.json
 ```
+
+## Servo seek (Arduino + classifier)
+
+Flash **`sketch_mar28a.ino`** (115200 baud): **one integer angle per line** (`0`–`180`), servo on **A1**.
+
+- **Live preview:** run `python run_camera.py`, enter a **COM port** when asked (or Enter for camera-only). **R / B / G / Y** starts seek; **P** rotates the view; **X** cancels seek.
+- **Headless (no window):** sweep until a color is found, then exit — you’ll be prompted for the port:
+
+```bash
+python run_camera.py --seek red
+```
+
+Tune with **`--seek-angle-step`**, **`--seek-settle`**, **`--seek-min-confidence`**, **`--seek-hits`**, **`--seek-max-frames`**, **`--seek-forward-only`**.
+
+Class names in `class_names.json` must match (e.g. `"red"`, `"blue"`).
 
 ## Troubleshooting
 
