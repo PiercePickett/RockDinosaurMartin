@@ -18,6 +18,8 @@ pip install -r requirements.txt
 
 Use **Python 3.10+**. A **GPU** is optional; CPU works.
 
+On startup, `run_camera.py` **prints detected cameras** with their index numbers. On Windows, `pip install pygrabber` adds USB **product names** next to each index (optional).
+
 ## Model files
 
 Place (or point `--checkpoint` / `--classes` at):
@@ -27,12 +29,21 @@ Place (or point `--checkpoint` / `--classes` at):
 
 ## Run
 
+**Pipeline:** opens **camera index 3** by default (`--camera` to change). Starts **rotated 90°** clockwise; press **R** to cycle rotation. Capture requests **1920×1080** (actual size is printed). After rotation, **center-crop to 16:9 landscape**. Classification uses a **center square** (side **≤ 480 px**, `--max-roi-side`). Align the toy with the yellow box.
+
+Override defaults: `--camera`, `--capture-width`, `--capture-height`, `--max-roi-side`, `--roi-fraction`.
+
+For reliable results, the model should be trained on **similar crops** (centered object, comparable scale).
+
 ```bash
 python run_camera.py
 ```
 
 - **Quit:** **Q** or **Esc** in the preview window.
-- **Different camera:** `python run_camera.py --camera 1`
+- **Switch camera:** number keys **0–9** pick that device index while the window is focused (no need to restart).
+- **Rotate view:** **R** cycles the feed **90°** at a time (0° → 90° → 180° → 270° → …). Classification uses the rotated image; train with the same orientation if it matters for your setup.
+- **Crosshair size:** `python run_camera.py --roi-fraction 0.35` (smaller) or `0.55` (larger).
+- **Different camera index:** `python run_camera.py --camera 0`
 - **Device:** `python run_camera.py --device cpu` or `--device cuda` (default: auto)
 - **Smoother overlay:** EMA is on by default; `python run_camera.py --ema 0` to disable.
 - **Higher FPS:** `python run_camera.py --every-n 2` (infer every other frame).
